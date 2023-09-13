@@ -15,3 +15,5 @@ Data files saved in folders named with gamma, pi, and rhoseed values. All runs s
 vis_hom_rho.py takes in values of g, pi, rhoseed, and run number and visualises the time evolution of the fields. Python parameter prompter will help if you type --help.
 
 ODE version is in a ipynb and doesn't require fenics obv.
+
+For parameter details and weak formulation look at overleaf manuscript
