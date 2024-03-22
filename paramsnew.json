@@ -1,14 +1,20 @@
 {
     "run" : 2,
-    "T" : 10,
-    "n_steps" : 1e+3,
-    "K" : 1e-4,
-    "Gammas" : 5.9,
-    "Pi" : 0.1,
+    "T" : 20,
+    "n_steps" : 4000,
+    "dt_dump" : 0.05,
+    "K" : 0.01,
+    "Gammas" : 20,
+    "gammaf" : 1,
+    "Pi" : 0.03,
+    "lambda": 2,
+    "mu":0.01,
+    "p0":0.1,
+    "r_p":1,
     "rhoseed" : 0.5,
     "rho_in" : 3.2,
     "rhoisoend" : 4.5,
     "rhonemend" : 6.0,
-    "mx" : 50,
-    "my" : 50
+    "mx" : 25,
+    "my" : 25
 }
