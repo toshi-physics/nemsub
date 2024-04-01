@@ -48,7 +48,7 @@ mymesh  = mesh.create_unit_square(comm, mx, my, mesh.CellType.triangle, ghost_mo
 dx      = ufl.Measure("dx", domain=mymesh)
 ds      = ufl.Measure("ds", domain=mymesh)
 normal  = ufl.FacetNormal(mymesh)
-RE      = ufl.FiniteElement("DG", mymesh.ufl_cell(), degree=1)    #scalar lagrange element for density
+RE      = ufl.FiniteElement("DG", mymesh.ufl_cell(), degree=2)    #scalar lagrange element for density
 VE      = ufl.VectorElement("Lagrange", mymesh.ufl_cell(), degree=2)    #vector lagrange element for velocity
 
 
@@ -73,21 +73,20 @@ u_n     = fem.Function(MF)   #solution from prev step
 #However, latter two are dolfinx function objects. u_n.split() uses u_n.sub(i) for all i.
 
 # Interpolate initial condition, random values of Qxx Qxy which are smaller than 0.1
-#np.random.seed(8987)
+#np.random.seed(898)
 
-center_x=0.5; center_y=0.5; radius=0.2
+center_x=0.5; center_y=0.5; radius=1.1
 def rhointer(x): # set density value to uniform seed value for now
     if comm.rank==0: print("shape of density field:", x.shape)
     distance = np.sqrt((x[0]-center_x)**2+(x[1]-center_y)**2)
     rhoseeds = rhoseed*np.abs(np.random.normal(size=np.size(distance)))
-    ret = np.where(distance <= radius, rhoseed, 0.01)
+    ret = np.where(distance <= radius, rhoseeds, 0.01)
     return ret
 def vinter(x):
-    theta = np.arctan2(x[1]-0.5,x[0]-0.5)
-    theta = np.where(theta<0, theta+2*np.pi, theta)
-    ret = np.zeros([mymesh.geometry.dim, x.shape[1]])
-    ret[0] = 0.01*np.cos(theta)
-    ret[1] = 0.01*np.sin(theta)
+    distance = np.sqrt((x[0]-center_x)**2+(x[1]-center_y)**2)
+    ret = 0.01*np.random.normal(size=(mymesh.geometry.dim, x.shape[1]))
+    ret[0] = np.where(distance<=radius, ret[0], 0)
+    ret[1] = np.where(distance<=radius, ret[1], 0)
     return ret
 def qinter(x):
     #distance = np.sqrt((x[0]-center_x)**2+(x[1]-center_y)**2)
@@ -147,8 +146,7 @@ kappas_n = ufl.as_vector([v_n[0].dx(0)-v_n[1].dx(1), v_n[0].dx(1)+v_n[1].dx(0)])
 Qrot_n      = 0.5*(v_n[1].dx(0)-v_n[0].dx(1)) * ufl.as_vector([Q_n[1], -Q_n[0]]) #cross product in ufl is only for 3D vectors
 
 #p_np1       = p0*ufl.exp(r_p*(rho_np1-rhoend_np1)) #for now rho_c is rho_end as I figure this out
-#p_n         = p0*ufl.exp(r_p*(rho_n-rhoend_n)) 
-p_n         = p0*rho_n  #for a simpler system just make pressure proportional to rho
+p_n         = p0*ufl.exp(r_p*(rho_n-rhoend_n)) 
 
 #Weak statement of the equations
 #weak statement for Q
@@ -159,7 +157,7 @@ F1 += dt*inner(Gamma_n*(1-rho_n+(rho_n*S2_n))*Q_np1, v_Q)*dx
 F1 += dt*inner(Gamma_n*K*grad(Q_np1), grad(v_Q))*dx #- dt*inner(Gamma_n*Pij, v_Q)*dx
 
 #weak statement for v
-F2  = inner(rho_n*v_np1, v_v)*dx -inner(rho_n*v_n, v_v)*dx + dt*inner(rho_n*ufl.dot(grad(v_n), v_n) , v_v)*dx 
+F2  = inner(rho_n*v_np1, v_v)*dx -inner(rho_n*v_n, v_v)*dx + dt*inner(rho_n*ufl.dot(grad(v_np1), v_np1) , v_v)*dx 
 F2 -= dt* inner(v_np1*rho_n, v_v)* dx 
 F2 += dt* inner(v_np1*rho_n * rho_n / rhoend_n, v_v)* dx
 F2 += dt* 0.5*mu* inner(grad(v_np1), grad(v_v))*dx
@@ -170,9 +168,9 @@ F2 += dt*gamma*inner(rho_n*v_np1, v_v)*dx
 #+ dt*lambd*inner(ufl.sqrt(S2_n)*div(HM_n), v_v)*dx
 
 #weak statement for rho
-F3  = inner(rho_np1, v_rho)* dx - inner(rho_n, v_rho)* dx + dt* inner(dot(grad(rho_n), v_n), v_rho)* dx 
+F3  = inner(rho_np1, v_rho)* dx - inner(rho_n, v_rho)* dx + dt* inner(dot(grad(rho_np1), v_n), v_rho)* dx 
 F3 += dt* inner(div(v_n)*rho_np1, v_rho)* dx - dt * inner(rho_np1, v_rho)* dx 
-F3 += dt* inner(rho_np1 * rho_n / rhoend_n, v_rho)* dx
+F3 += dt* inner(rho_np1 * rho_np1 / rhoend_n, v_rho)* dx
 
 F   = F1 + F2 + F3
 
