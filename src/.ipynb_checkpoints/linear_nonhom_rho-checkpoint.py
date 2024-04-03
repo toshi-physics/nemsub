@@ -23,6 +23,7 @@ n_steps   = parameters["n_steps"]  # number of time steps
 K         = parameters["K"]        # elastic constant, sets diffusion lengthscale of S with Gamma0
 Gammas    = parameters["Gammas"]   # rate of Q alignment with mol field H
 gamma     = parameters["gammaf"]   # traction coefficient
+alpha     = parameters["alpha"]    # active contractile stress
 lambd     = parameters["lambda"]
 mu        = parameters["mu"]
 p0        = parameters["p0"]       # pressure when cells are close packed, should be very high
@@ -37,7 +38,7 @@ my        = np.int32(parameters["my"])
 
 dt        = T / n_steps     # time step size
 
-savedir     = "../w_lambda/gammas_{:.2f}_rhoseed_{:.2f}_pi_{:.2f}/run_{}/".format(Gammas, rhoseed, Pi, run)
+savedir     = "../wo_pi/w_lambda/gammas_{:.2f}_rhoseed_{:.2f}_pi_{:.2f}/run_{}/".format(Gammas, rhoseed, Pi, run)
 
 if comm.rank==0:
     os.makedirs(savedir)
@@ -75,11 +76,11 @@ u_n     = fem.Function(MF)   #solution from prev step
 # Interpolate initial condition, random values of Qxx Qxy which are smaller than 0.1
 #np.random.seed(898)
 
-center_x=0.5; center_y=0.5; radius=0.5
+center_x=0.5; center_y=0.5; radius=0.9
 def rhointer(x): # set density value to uniform seed value for now
     if comm.rank==0: print("shape of density field:", x.shape)
     distance = np.sqrt((x[0]-center_x)**2+(x[1]-center_y)**2)
-    mean = rhoseed; std = rhoseed/5
+    mean = rhoseed; std = rhoseed/2
     rhoseeds = np.abs(np.random.normal(mean, std, size=np.size(distance)))
     ret = np.where(distance <= radius, rhoseeds*(radius-distance)/radius, 0.001)
     return ret
@@ -146,20 +147,18 @@ HM_np1      = ufl.as_matrix([[H_np1[0], H_np1[1]],[H_np1[1], -H_np1[0]]])
 HM_n        = ufl.as_matrix([[H_n[0], H_n[1]],[H_n[1], -H_n[0]]])
 Qrot_np1    = 0.5*(v_n[0].dx(1)-v_n[1].dx(0)) * ufl.as_vector([Q_np1[1], -Q_np1[0]]) #cross product in ufl is only for 3D vectors
 Qrot_n      = 0.5*(v_n[0].dx(1)-v_n[1].dx(0)) * ufl.as_vector([Q_n[1], -Q_n[0]]) #cross product in ufl is only for 3D vectors
+QM_n        = ufl.as_matrix([[Q_n[0], Q_n[1]], [Q_n[1], -Q_n[0]]])
 
 p_np1       = p0*ufl.exp(r_p*(rho_np1-rhoend_np1)) #for now rho_c is rho_end as I figure this out
 p_n         = p0*ufl.exp(r_p*(rho_n-rhoend_n)) 
-
-#sigma_np1   = mu*kappas_np1 - ufl.sqrt(S2_np1)*lambd*H_np1#-p_np1*Id
-#divsigma_np1= mu*0.5*div(grad(v_np1))-lambd*dot(HM_np1, grad(ufl.sqrt(S2_np1)))-lambd*ufl.sqrt(S2_np1)*ufl.div(HM_np1)-r_p*p_np1*grad(rho_np1)
 
 #Weak statement of the equations
 #weak statement for Q
 F1  = inner(Q_np1, v_Q) * dx - inner(Q_n, v_Q) * dx 
 F1 += dt * inner(dot(grad(Q_n), v_n), v_Q) * dx - dt*2*inner(Qrot_n, v_Q)*dx 
-F1 -= dt*inner(ufl.sqrt(S2_np1)*lambd*kappas_n, v_Q)*dx 
+F1 -= dt*inner(lambd*kappas_n, v_Q)*dx 
 F1 += dt*inner(Gamma_n*(1-rho_n+(rho_n*S2_n))*Q_np1, v_Q)*dx
-F1 += dt*inner(Gamma_n*K*grad(Q_np1), grad(v_Q))*dx - dt*inner(Gamma_n*Pi*Pij, v_Q)*dx
+F1 += dt*inner(Gamma_n*K*grad(Q_np1), grad(v_Q))*dx #- dt*inner(Gamma_n*Pi*Pij, v_Q)*dx
 
 #weak statement for v
 F2  = inner(rho_n*v_np1, v_v)*dx -inner(rho_n*v_n, v_v)*dx + dt*inner(rho_n*ufl.dot(grad(v_np1), v_np1) , v_v)*dx 
@@ -169,8 +168,8 @@ F2 += dt* 0.5*mu* inner(grad(v_np1), grad(v_v))*dx
 F2 += dt* 0.5*mu* inner(div(v_np1), div(v_v))*dx - dt* 0.5*mu* inner(div(v_np1), dot(normal, v_v))*ds
 F2 += dt*r_p*inner(p_n*grad(rho_n), v_v)*dx
 F2 += dt*gamma*inner(rho_n*v_np1, v_v)*dx
-F2 += dt*2*lambd*inner(dot(dot(Q_n, grad(Q_n)), HM_n)/ufl.sqrt(S2_n), v_v)*dx
-F2 += dt*lambd*inner(ufl.sqrt(S2_n)*div(HM_n), v_v)*dx
+F2 += dt*lambd*inner(div(HM_n), v_v)*dx
+F2 += dt*alpha*inner(div(QM_n), v_v)*dx
 
 #weak statement for rho
 F3  = inner(rho_np1, v_rho)* dx - inner(rho_n, v_rho)* dx + dt* inner(dot(grad(rho_np1), v_n), v_rho)* dx 

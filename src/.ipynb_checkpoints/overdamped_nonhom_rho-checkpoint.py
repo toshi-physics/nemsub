@@ -13,7 +13,7 @@ import os, json
 
 comm = MPI.COMM_WORLD
 
-with open('paramsnew.json') as jsonFile:
+with open('paramsoverdamped.json') as jsonFile:
     parameters = json.load(jsonFile)
 
 run       = parameters["run"]
@@ -23,8 +23,10 @@ n_steps   = parameters["n_steps"]  # number of time steps
 K         = parameters["K"]        # elastic constant, sets diffusion lengthscale of S with Gamma0
 Gammas    = parameters["Gammas"]   # rate of Q alignment with mol field H
 gamma     = parameters["gammaf"]   # traction coefficient
-lambd     = parameters["lambda"]
-mu        = parameters["mu"]
+alpha     = parameters["alpha"]    # active contractile stress
+chi       = parameters["chi"]      # coefficient of density gradients in Q's free energy
+D         = parameters["D"]        # Density diffusion coefficient in density dynamics
+lambd     = parameters["lambda"]   # flow alignment parameter
 p0        = parameters["p0"]       # pressure when cells are close packed, should be very high
 r_p       = parameters["r_p"]      # rate of pressure growth equal to rate of growth of cells
 Pi        = parameters["Pi"]       # strength of alignment
@@ -37,7 +39,7 @@ my        = np.int32(parameters["my"])
 
 dt        = T / n_steps     # time step size
 
-savedir     = "../w_lambda/gammas_{:.2f}_rhoseed_{:.2f}_pi_{:.2f}/run_{}/".format(Gammas, rhoseed, Pi, run)
+savedir     = "../wo_pi/w_lambda/gammas_{:.2f}_rhoseed_{:.2f}_pi_{:.2f}/run_{}/".format(Gammas, rhoseed, Pi, run)
 
 if comm.rank==0:
     os.makedirs(savedir)
@@ -53,8 +55,8 @@ VE      = ufl.VectorElement("Lagrange", mymesh.ufl_cell(), degree=2)    #vector 
 
 
 # Define test functions (no trials for nonlinear eqtns)
-MF         = fem.FunctionSpace(mymesh, ufl.MixedElement(RE, VE))
-v_rho, v_Q = ufl.TestFunctions(MF)
+MF       = fem.FunctionSpace(mymesh, ufl.MixedElement(RE, VE, VE))
+v_rho, v_Q, v_v = ufl.TestFunctions(MF)
 
 # Define functions for solutions at previous and current time steps
 
@@ -62,10 +64,10 @@ u_np1   = fem.Function(MF)   #unknown Q, and density fields
 u_n     = fem.Function(MF)   #solution from prev step
 
 #unknown Q, rho, vel, and stress fields
-(rho_np1, Q_np1) = ufl.split(u_np1) #references to components of u_np1
+(rho_np1, Q_np1, v_np1) = ufl.split(u_np1) #references to components of u_np1
 
 #solutions from prev step
-(rho_n, Q_n) = ufl.split(u_n) #references to components of u_n
+(rho_n, Q_n, v_n) = ufl.split(u_n) #references to components of u_n
 
 #these references are ufl expressions. Not dolfinx functions. 
 #Cannot interpolate or do anything that requires a dolfinx function.
@@ -75,15 +77,21 @@ u_n     = fem.Function(MF)   #solution from prev step
 # Interpolate initial condition, random values of Qxx Qxy which are smaller than 0.1
 #np.random.seed(898)
 
-center_x=0.5; center_y=0.5; radius=0.2
+center_x=0.5; center_y=0.5; radius=0.9
 def rhointer(x): # set density value to uniform seed value for now
     if comm.rank==0: print("shape of density field:", x.shape)
     distance = np.sqrt((x[0]-center_x)**2+(x[1]-center_y)**2)
-    mean = rhoseed; std = rhoseed/5
+    mean = rhoseed; std = rhoseed/2
     rhoseeds = np.abs(np.random.normal(mean, std, size=np.size(distance)))
     ret = np.where(distance <= radius, rhoseeds*(radius-distance)/radius, 0.001)
     return ret
-
+def vinter(x):
+    theta  = np.arctan2((x[1]-center_y), (x[0]-center_x))
+    theta  = np.where(theta<0, theta+2*np.pi, theta)
+    ret    = np.zeros([mymesh.geometry.dim, x.shape[1]])
+    ret[0] = 0.01*np.cos(theta)
+    ret[1] = 0.01*np.sin(theta)
+    return ret
 def qinter(x):
     #distance = np.sqrt((x[0]-center_x)**2+(x[1]-center_y)**2)
     theta    = np.pi*np.abs(np.random.normal(size=(x.shape[1])))
@@ -95,6 +103,7 @@ def qinter(x):
 u_n.sub(0).interpolate(rhointer)
 u_n.sub(0).x.array[:] = abs(u_n.sub(0).x.array) #make sure all interpolated density values are positive, sometimes it messes it up when there are high gradients
 u_n.sub(1).interpolate(qinter)
+u_n.sub(2).interpolate(vinter)
 
 u_n.x.scatter_forward()
 u_np1.x.array[:] = u_n.x.array
@@ -119,6 +128,8 @@ rhoend_n    = rhonemend#rhoisoend + ((rhonemend-rhoisoend) * S2_n * 2/(1+(S2_n))
 Gamma_np1   = Gammas * ufl.tanh((rhoend_np1 - rho_np1)) # value of Gamma_n+1 at t=0
 Gamma_n     = Gammas * ufl.tanh((rhoend_n - rho_n)) # value of Gamma_n+1 at t=0
 
+divv_np1    = div(v_np1)
+gradv_np1   = grad(v_np1)
 #note: grad(Tensor) is implemented in ufl as: del_k T_ij = gradT_ijk
 #ctd: grad(Vector) is implemented in ufl as: del_k V_i = gradV_ik
 #ctd: div(Tensor) is implemented in ufl as: del_jT_ij (which is the correct form)
@@ -126,35 +137,40 @@ Gamma_n     = Gammas * ufl.tanh((rhoend_n - rho_n)) # value of Gamma_n+1 at t=0
 #ctd: and v.grad(T)=v_k del_k T_ij should be implemented as dot(grad(T), v)
 #ctd: this will be important when writing weak forms.
 
-H_np1       = -(1-rho_np1+rho_np1*S2_np1)*Q_np1  + Pi*Pij
-H_n         = -(1-rho_n+rho_n*S2_n)*Q_n + Pi*Pij
-HM_np1      = ufl.as_matrix([[H_np1[0], H_np1[1]],[H_np1[1], -H_np1[0]]])
-HM_n        = ufl.as_matrix([[H_n[0], H_n[1]], [H_n[1], -H_n[0]]])
+kappas_np1  = 0.5 * (gradv_np1 + gradv_np1.T - divv_np1*Id)
+#kappaa_np1  = 0.5 * (gradv_np1 - gradv_np1.T)
+
+kappas_n = ufl.as_vector([v_n[0].dx(0)-v_n[1].dx(1), v_n[0].dx(1)+v_n[1].dx(0)])/2
+
 QM_n        = ufl.as_matrix([[Q_n[0], Q_n[1]], [Q_n[1], -Q_n[0]]])
-#Qrot_np1    = 0.5*(v_n[1].dx(0)-v_n[0].dx(1)) * ufl.as_vector([Q_np1[1], -Q_np1[0]]) #cross product in ufl is only for 3D vectors
-#Qrot_n      = 0.5*(v_n[1].dx(0)-v_n[0].dx(1)) * ufl.as_vector([Q_n[1], -Q_n[0]]) #cross product in ufl is only for 3D vectors
 
 p_np1       = p0*ufl.exp(r_p*(rho_np1-rhoend_np1)) #for now rho_c is rho_end as I figure this out
 p_n         = p0*ufl.exp(r_p*(rho_n-rhoend_n)) 
 
-#sigma_np1   = mu*kappas_np1 - ufl.sqrt(S2_np1)*lambd*H_np1#-p_np1*Id
-#divsigma_np1= mu*0.5*div(grad(v_np1))-lambd*dot(HM_np1, grad(ufl.sqrt(S2_np1)))-lambd*ufl.sqrt(S2_np1)*ufl.div(HM_np1)-r_p*p_np1*grad(rho_np1)
-
+n_rho_vector = ufl.as_vector([normal[0]*rho_n.dx(0)-normal[1]*rho_n.dx(1) , normal[0]*rho_n.dx(1)+normal[1]*rho_n.dx(0)])
 #Weak statement of the equations
 #weak statement for Q
 F1  = inner(Q_np1, v_Q) * dx - inner(Q_n, v_Q) * dx 
 F1 += dt * inner(dot(grad(Q_n), v_n), v_Q) * dx - dt*2*inner(Qrot_n, v_Q)*dx 
-F1 += -dt*inner(ufl.sqrt(S2_np1)*lambd*kappas_n, v_Q)*dx 
+F1 -= dt*inner(lambd*kappas_n, v_Q)*dx 
 F1 += dt*inner(Gamma_n*(1-rho_n+(rho_n*S2_n))*Q_np1, v_Q)*dx
-F1 += dt*inner(Gamma_n*K*grad(Q_np1), grad(v_Q))*dx - dt*inner(Gamma_n*Pi*Pij, v_Q)*dx
+F1 += dt*inner(Gamma_n*K*grad(Q_np1), grad(v_Q))*dx #- dt*inner(Gamma_n*Pi*Pij, v_Q)*dx
+F1 += dt*0.5*chi*Gamma_n*inner(n_rho_vector, v_Q)*ds
+F1 += dt*0.5*chi*Gamma_n*(-rho_n.dx(0)*v_Q[0].dx(0)+rho_n.dx(1)*v_Q[0].dx(1)-rho_n.dx(1)*v_Q[1].dx(0)-rho_n.dx(0)*v_Q[1].dx(1))*dx
+
+#weak statement for v
+F2  = gamma*inner(rho_n*v_np1, v_v)*dx
+F2 += r_p*inner(p_n*grad(rho_n), v_v)*dx
+F2 -= alpha*inner(div(QM_n), v_v)*dx
 
 #weak statement for rho
 F3  = inner(rho_np1, v_rho)* dx - inner(rho_n, v_rho)* dx
-F3 += dt*D*inner(grad(rho), grad(v_rho)*dx - dt*Dq*inner(div(QM_n), grad(v_rho))*dx
-F3 += - dt * inner(rho_np1, v_rho)* dx 
-F3 += dt* inner(rho_np1 * rho_np1 / rhoend_n, v_rho)* dx
+F3 += dt* (alpha/gamma)* inner(dot(normal, div(QM_n)), v_rho)*ds - dt* (alpha/gamma) *inner(div(QM_n), grad(v_rho))*dx
+F3 += dt* (r_p/gamma) *inner(p_n*grad(rho_np1), grad(v_rho))* dx
+F3 += dt* D*inner(grad(rho_np1), grad(v_rho))*dx
+F3 += - dt * inner(rho_np1, v_rho)* dx + dt* inner(rho_np1 * rho_np1 / rhoend_n, v_rho)* dx
 
-F   = F1 + F3
+F   = F1 + F2 + F3
 print('all forms created')
 #Create nonlinear problem and Newton Solver
 problem = NonlinearProblem(F, u_np1)
@@ -200,7 +216,8 @@ for i, point in enumerate(points.T):
 pointss = np.array(pointss, dtype=np.float64)
 
 def savedatscalar(filename, function, n):
-    np.savetxt(savedir+filename+'_{:d}.csv'.format(n), function.eval(pointss, cells).reshape(mx, my))
+    field = function.eval(pointss, cells).reshape(mx, my)
+    np.savetxt(savedir+filename+'_{:d}.csv'.format(n), field)
 def savedatvector(filename, function, n):
     field = function.eval(pointss, cells).reshape(mx, my, 2)
     np.savetxt(savedir+filename+'x_{:d}.csv'.format(n), field[:,:,0])
@@ -216,6 +233,7 @@ with open(savedir+'parameters.json', 'w') as f:
     json.dump(parameters, f)
 print('parameter dump created')
 savefile('rho', u_n.sub(0).collapse(), ndump); savedatscalar('rho', u_n.sub(0), ndump)
+savefile('v', u_n.sub(2).collapse(), ndump); savedatvector('v', u_n.sub(2), ndump)
 savefile('Q', u_n.sub(1).collapse(), ndump); savedatvector('Q', u_n.sub(1), ndump)
 
 while (n < n_steps):
@@ -234,6 +252,7 @@ while (n < n_steps):
         if comm.rank==0:
             print(f'Time t {t}; Step n {n}; Num iterations {r[0]}')
         savefile('rho', u_n.sub(0).collapse(), ndump) ; savedatscalar('rho', u_n.sub(0), ndump)
+        savefile('v', u_n.sub(2).collapse(), ndump) ; savedatvector('v', u_n.sub(2), ndump)
         savefile('Q', u_n.sub(1).collapse(), ndump) ; savedatvector('Q', u_n.sub(1), ndump)
     
 print(f'Solver finished')
